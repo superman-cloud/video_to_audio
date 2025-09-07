@@ -1,20 +1,20 @@
-# VideoAudio Batch Converter - 依赖包列表
+# VideoAudio Batch Converter - Dependencies
 # 
-# 安装命令: pip install -r requirements.txt
+# Install command: pip install -r requirements.txt
 
-# 进度条显示库
+# Progress bar library
 tqdm>=4.64.0
 
-# FFmpeg Python绑定 (可选，如果系统已安装ffmpeg可以不需要)
+# FFmpeg Python binding (optional if ffmpeg is already installed on system)
 # ffmpeg-python>=0.2.0
 
-# 以下是Python标准库，无需额外安装
-# pathlib      # 路径处理 (Python 3.4+内置)
-# configparser # 配置文件管理 (内置)
-# argparse     # 命令行参数解析 (内置)
-# logging      # 日志系统 (内置)
-# subprocess   # 子进程管理 (内置)
-# os           # 操作系统接口 (内置)
-# sys          # 系统相关参数 (内置)
-# time         # 时间处理 (内置)
-# typing       # 类型提示 (Python 3.5+内置)
+# The following are Python standard libraries, no additional installation needed
+# pathlib      # Path handling (built-in Python 3.4+)
+# configparser # Configuration file management (built-in)
+# argparse     # Command line argument parsing (built-in)
+# logging      # Logging system (built-in)
+# subprocess   # Subprocess management (built-in)
+# os           # Operating system interface (built-in)
+# sys          # System-related parameters (built-in)
+# time         # Time handling (built-in)
+# typing       # Type hints (built-in Python 3.5+)

@@ -16,10 +16,13 @@ import logging
 import subprocess
 import configparser
 import hashlib
+import re
 from pathlib import Path
 from typing import List, Tuple, Optional, Dict, Set
 from tqdm import tqdm
 import time
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 class VideoAudioConverter:
@@ -56,6 +59,9 @@ class VideoAudioConverter:
         self.file_hashes: Dict[str, Path] = {}  # 存储文件哈希值和路径的映射
         self.duplicate_files: Set[Path] = set()  # 存储重复文件路径
         self.processed_files: Set[Path] = set()  # 存储已处理文件路径
+        
+        # 多线程相关
+        self._lock = threading.Lock()  # 线程锁，用于保护共享资源
         
         self.setup_logging()
         self.load_config()
@@ -133,6 +139,8 @@ class VideoAudioConverter:
                 [ffmpeg_path, '-version'],
                 capture_output=True,
                 text=True,
+                encoding='utf-8',
+                errors='ignore',  # 忽略编码错误
                 timeout=10
             )
             
@@ -283,6 +291,78 @@ class VideoAudioConverter:
         
         return video_files
         
+    def clean_filename(self, filename: str) -> str:
+        """
+        清理文件名，移除或替换特殊字符
+        
+        Args:
+            filename: 原始文件名
+            
+        Returns:
+            清理后的文件名
+        """
+        # 定义需要移除或替换的特殊字符
+        # Windows 文件名不允许的字符: < > : " | ? * \ /
+        # 其他可能导致问题的字符
+        
+        # 先移除或替换特殊字符
+        cleaned = filename
+        
+        # 替换常见的特殊字符
+        replacements = {
+            '<': '',
+            '>': '',
+            ':': '-',
+            '"': '',
+            '|': '-',
+            '?': '',
+            '*': '',
+            '\\': '',
+            '/': '-',
+            '【': '[',
+            '】': ']',
+            '（': '(',
+            '）': ')',
+            '？': '',
+            '！': '',
+            '：': '-',
+            '；': '',
+            '，': ',',
+            '。': '.',
+            '、': '',
+            '～': '-',
+            '…': '...',
+            '—': '-',
+            '–': '-',
+            ''': "'",
+            ''': "'",
+            '"': '"',
+            '"': '"',
+        }
+        
+        for old_char, new_char in replacements.items():
+            cleaned = cleaned.replace(old_char, new_char)
+        
+        # 移除连续的空格和特殊字符
+        cleaned = re.sub(r'\s+', ' ', cleaned)  # 多个空格替换为单个空格
+        cleaned = re.sub(r'[-_]+', '-', cleaned)  # 多个连字符替换为单个
+        cleaned = re.sub(r'\.+', '.', cleaned)  # 多个点替换为单个
+        
+        # 移除开头和结尾的空格、点、连字符
+        cleaned = cleaned.strip(' .-_')
+        
+        # 如果文件名为空或只有扩展名，使用默认名称
+        if not cleaned or cleaned.startswith('.'):
+            cleaned = 'converted_file'
+        
+        # 限制文件名长度（Windows 路径限制）
+        if len(cleaned) > 200:
+            cleaned = cleaned[:200]
+        
+        self.logger.debug(f"文件名清理: '{filename}' -> '{cleaned}'")
+        
+        return cleaned
+    
     def generate_audio_filename(self, 
                               video_path: Path, 
                               output_dir: Optional[str] = None,
@@ -298,6 +378,9 @@ class VideoAudioConverter:
         Returns:
             生成的音频文件路径
         """
+        # 清理文件名
+        clean_stem = self.clean_filename(video_path.stem)
+        
         if output_dir:
             output_path = Path(output_dir)
             
@@ -308,17 +391,19 @@ class VideoAudioConverter:
                     # 获取视频文件相对于其根目录的路径
                     relative_dir = video_path.parent.name if video_path.parent != video_path.anchor else ""
                     if relative_dir:
-                        output_path = output_path / relative_dir
+                        # 也清理目录名
+                        clean_relative_dir = self.clean_filename(relative_dir)
+                        output_path = output_path / clean_relative_dir
                 except:
                     # 如果计算相对路径失败，直接使用输出目录
                     pass
             
             # 创建输出目录
             output_path.mkdir(parents=True, exist_ok=True)
-            audio_filename = output_path / f"{video_path.stem}.{output_format}"
+            audio_filename = output_path / f"{clean_stem}.{output_format}"
         else:
             # 输出到原文件同目录
-            audio_filename = video_path.parent / f"{video_path.stem}.{output_format}"
+            audio_filename = video_path.parent / f"{clean_stem}.{output_format}"
             
         return audio_filename
         
@@ -371,6 +456,8 @@ class VideoAudioConverter:
                 cmd,
                 capture_output=True,
                 text=True,
+                encoding='utf-8',
+                errors='ignore',  # 忽略编码错误
                 timeout=300,  # 5分钟超时
                 check=True
             )
@@ -393,12 +480,41 @@ class VideoAudioConverter:
             self.logger.error(f"✗ 转换出错 {input_path.name}: {str(e)}")
             return False
             
+    def _convert_single_task(self, video_file: Path, output_directory: Optional[str], 
+                           audio_format: str, bitrate: str) -> Tuple[bool, Path, Path]:
+        """
+        单个文件转换任务（用于多线程）
+        
+        Returns:
+            (是否成功, 输入文件路径, 输出文件路径)
+        """
+        try:
+            # 生成输出文件路径
+            audio_file = self.generate_audio_filename(
+                video_file, output_directory, audio_format
+            )
+            
+            # 如果文件名被清理了，显示信息
+            if video_file.stem != audio_file.stem:
+                with self._lock:
+                    self.logger.info(f"🔧 文件名已清理: {video_file.name} -> {audio_file.name}")
+            
+            # 转换文件
+            success = self.convert_single_file(video_file, audio_file, audio_format, bitrate)
+            return success, video_file, audio_file
+            
+        except Exception as e:
+            with self._lock:
+                self.logger.error(f"任务执行出错 {video_file.name}: {e}")
+            return False, video_file, Path("")
+
     def batch_convert(self, 
                      input_directory: str, 
                      output_directory: Optional[str] = None,
                      audio_format: str = 'mp3',
                      bitrate: str = '192k',
-                     recursive: bool = True) -> Tuple[int, int, int]:
+                     recursive: bool = True,
+                     max_workers: Optional[int] = None) -> Tuple[int, int, int]:
         """
         批量转换视频文件
         
@@ -408,6 +524,7 @@ class VideoAudioConverter:
             audio_format: 音频格式
             bitrate: 音频比特率
             recursive: 是否递归扫描
+            max_workers: 最大线程数，None表示使用配置文件中的设置
             
         Returns:
             (成功数量, 总数量, 重复数量)
@@ -429,40 +546,84 @@ class VideoAudioConverter:
         success_count = 0
         total_count = len(video_files)
         
+        # 确定线程数
+        if max_workers is None:
+            max_workers = self.config.getint('DEFAULT', 'max_concurrent_jobs', fallback=1)
+        
         self.logger.info(f"🎥 开始批量转换 {total_count} 个文件")
         if duplicate_count > 0:
             print(f"\n🔄 检测到 {duplicate_count} 个重复文件，已跳过")
         print(f"\n🎥 开始处理 {total_count} 个视频文件...")
+        print(f"🧵 使用线程数: {max_workers}")
         
-        # 使用tqdm显示进度
-        with tqdm(
-            video_files, 
-            desc="转换进度", 
-            unit="文件",
-            ncols=100,
-            bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]'
-        ) as pbar:
-            
-            for video_file in pbar:
-                # 更新进度条描述
-                pbar.set_description(f"📹 {video_file.name[:30]}...")
+        if max_workers == 1:
+            # 单线程处理
+            with tqdm(
+                video_files, 
+                desc="转换进度", 
+                unit="文件",
+                ncols=100,
+                bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]'
+            ) as pbar:
                 
-                # 生成输出文件路径
-                audio_file = self.generate_audio_filename(
-                    video_file, output_directory, audio_format
-                )
-                
-                # 转换文件
-                if self.convert_single_file(video_file, audio_file, audio_format, bitrate):
-                    success_count += 1
+                for video_file in pbar:
+                    # 更新进度条描述
+                    pbar.set_description(f"📹 {video_file.name[:30]}...")
                     
-                # 更新进度条后缀信息
-                pbar.set_postfix({
-                    '✅': success_count,
-                    '❌': total_count - success_count,
-                    '🔄': duplicate_count,
-                    '当前': audio_file.name[:15] + "..." if len(audio_file.name) > 15 else audio_file.name
-                })
+                    success, _, audio_file = self._convert_single_task(
+                        video_file, output_directory, audio_format, bitrate
+                    )
+                    
+                    if success:
+                        success_count += 1
+                        
+                    # 更新进度条后缀信息
+                    pbar.set_postfix({
+                        '✅': success_count,
+                        '❌': total_count - success_count,
+                        '🔄': duplicate_count,
+                        '当前': audio_file.name[:15] + "..." if audio_file.name and len(audio_file.name) > 15 else str(audio_file.name)
+                    })
+        else:
+            # 多线程处理
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                # 提交所有任务
+                future_to_file = {
+                    executor.submit(self._convert_single_task, video_file, output_directory, audio_format, bitrate): video_file
+                    for video_file in video_files
+                }
+                
+                # 使用tqdm显示进度
+                with tqdm(
+                    total=total_count,
+                    desc="转换进度", 
+                    unit="文件",
+                    ncols=100,
+                    bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]'
+                ) as pbar:
+                    
+                    for future in as_completed(future_to_file):
+                        video_file = future_to_file[future]
+                        
+                        try:
+                            success, _, audio_file = future.result()
+                            
+                            if success:
+                                success_count += 1
+                            
+                            # 更新进度条
+                            pbar.update(1)
+                            pbar.set_description(f"📹 {video_file.name[:30]}...")
+                            pbar.set_postfix({
+                                '✅': success_count,
+                                '❌': pbar.n - success_count,
+                                '🔄': duplicate_count,
+                                '线程': max_workers
+                            })
+                            
+                        except Exception as e:
+                            self.logger.error(f"任务执行异常 {video_file.name}: {e}")
+                            pbar.update(1)
                 
         return success_count, total_count, duplicate_count
 
@@ -548,6 +709,11 @@ def main():
         help='配置文件路径 (默认: config.ini)'
     )
     parser.add_argument(
+        '-j', '--jobs', 
+        type=int,
+        help='并发线程数 (默认使用配置文件中的设置，1表示单线程)'
+    )
+    parser.add_argument(
         '--version', 
         action='version',
         version='VideoAudio Batch Converter v1.0.0'
@@ -593,6 +759,10 @@ def main():
         print(f"🔊 音频质量: {args.quality}")
         print(f"📊 递归扫描: {'否' if args.no_recursive else '是'}")
         print(f"🔄 覆盖文件: {'是' if args.overwrite else '否'}")
+        
+        # 显示线程信息
+        max_workers = args.jobs if args.jobs else converter.config.getint('DEFAULT', 'max_concurrent_jobs', fallback=1)
+        print(f"🧵 并发线程: {max_workers}")
         print("=" * 60)
         
         # 开始批量转换
@@ -603,7 +773,8 @@ def main():
             output_directory,
             args.format,
             args.quality,
-            not args.no_recursive
+            not args.no_recursive,
+            args.jobs
         )
         
         end_time = time.time()
