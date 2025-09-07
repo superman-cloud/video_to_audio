@@ -145,7 +145,36 @@ class VideoAudioConverter:
             )
             
             if result.returncode == 0:
-                self.logger.info("FFmpeg检查通过")
+                self.logger.info(f"FFmpeg检查通过: {ffmpeg_path}")
+                
+                # 同时检查ffprobe是否可用（用于获取视频时长）
+                ffprobe_path = None
+                if 'ffmpeg' in ffmpeg_path.lower():
+                    ffmpeg_dir = Path(ffmpeg_path).parent
+                    potential_ffprobe = ffmpeg_dir / 'ffprobe.exe'
+                    if potential_ffprobe.exists():
+                        ffprobe_path = str(potential_ffprobe)
+                    else:
+                        ffprobe_path = ffmpeg_path.replace('ffmpeg', 'ffprobe')
+                else:
+                    ffprobe_path = 'ffprobe'
+                
+                try:
+                    probe_result = subprocess.run(
+                        [ffprobe_path, '-version'],
+                        capture_output=True,
+                        text=True,
+                        encoding='utf-8',
+                        errors='ignore',
+                        timeout=5
+                    )
+                    if probe_result.returncode == 0:
+                        self.logger.info(f"FFprobe也可用: {ffprobe_path}")
+                    else:
+                        self.logger.warning("FFprobe不可用，将使用FFmpeg获取视频信息")
+                except:
+                    self.logger.warning("FFprobe不可用，将使用FFmpeg获取视频信息")
+                
                 return True
             else:
                 self.logger.error("FFmpeg不可用")
@@ -153,6 +182,7 @@ class VideoAudioConverter:
                 
         except (subprocess.TimeoutExpired, FileNotFoundError) as e:
             self.logger.error(f"FFmpeg检查失败: {e}")
+            self.logger.error("请确保FFmpeg已正确安装并添加到系统PATH中")
             return False
             
     def calculate_file_hash(self, file_path: Path, chunk_size: int = 8192) -> Optional[str]:
@@ -231,32 +261,54 @@ class VideoAudioConverter:
             self.logger.warning(f"重复文件检查失败 {file_path.name}: {e}")
             return False
         
-    def scan_video_files(self, directory: str, recursive: bool = True) -> List[Path]:
+    def scan_video_files(self, path: str, recursive: bool = True) -> List[Path]:
         """
-        扫描目录下的所有视频文件（包括重复文件检测）
+        扫描目录下的所有视频文件或验证单个视频文件（包括重复文件检测）
         
         Args:
-            directory: 要扫描的目录路径
-            recursive: 是否递归扫描子目录
+            path: 要扫描的目录路径或单个文件路径
+            recursive: 是否递归扫描子目录（仅对目录有效）
             
         Returns:
             视频文件路径列表（已排除重复文件）
         """
-        directory = Path(directory)
+        path_obj = Path(path)
         video_files = []
         
-        if not directory.exists():
-            self.logger.error(f"目录不存在: {directory}")
+        if not path_obj.exists():
+            self.logger.error(f"路径不存在: {path_obj}")
             return video_files
+        
+        # 处理单个文件
+        if path_obj.is_file():
+            if path_obj.suffix.lower() in self.SUPPORTED_VIDEO_FORMATS:
+                self.logger.info(f"🔎 处理单个视频文件: {path_obj}")
+                
+                # 重置重复文件检测状态
+                self.file_hashes.clear()
+                self.duplicate_files.clear()
+                
+                # 检查是否为重复文件（虽然单文件情况下不太可能）
+                if not self.is_duplicate_file(path_obj):
+                    video_files.append(path_obj)
+                    self.logger.info(f"📋 文件验证通过: {path_obj.name}")
+                else:
+                    self.logger.warning(f"⛔ 跳过重复文件: {path_obj.name}")
+            else:
+                self.logger.error(f"不支持的文件格式: {path_obj.suffix}")
+                self.logger.info(f"支持的格式: {', '.join(self.SUPPORTED_VIDEO_FORMATS)}")
             
-        if not directory.is_dir():
-            self.logger.error(f"路径不是目录: {directory}")
+            return video_files
+        
+        # 处理目录
+        if not path_obj.is_dir():
+            self.logger.error(f"路径既不是文件也不是目录: {path_obj}")
             return video_files
             
         # 设置扫描模式
         pattern = '**/*' if recursive else '*'
         
-        self.logger.info(f"🔎 开始扫描目录: {directory}")
+        self.logger.info(f"🔎 开始扫描目录: {path_obj}")
         
         # 重置重复文件检测状态
         self.file_hashes.clear()
@@ -266,7 +318,7 @@ class VideoAudioConverter:
         total_scanned = 0
         
         try:
-            for file_path in directory.glob(pattern):
+            for file_path in path_obj.glob(pattern):
                 if (file_path.is_file() and 
                     file_path.suffix.lower() in self.SUPPORTED_VIDEO_FORMATS):
                     total_scanned += 1
@@ -363,6 +415,106 @@ class VideoAudioConverter:
         
         return cleaned
     
+    def _get_video_duration(self, video_path: Path) -> Optional[float]:
+        """
+        获取视频文件的时长（秒）
+        
+        Args:
+            video_path: 视频文件路径
+            
+        Returns:
+            视频时长（秒），失败返回None
+        """
+        try:
+            ffmpeg_path = self.config.get('DEFAULT', 'ffmpeg_path', fallback='ffmpeg')
+            
+            # 方法1: 尝试使用ffprobe（最准确）
+            ffprobe_candidates = []
+            
+            if 'ffmpeg' in ffmpeg_path.lower():
+                # 如果ffmpeg_path包含完整路径，尝试在同目录找ffprobe
+                ffmpeg_dir = Path(ffmpeg_path).parent
+                ffprobe_candidates.extend([
+                    ffmpeg_dir / 'ffprobe.exe',
+                    ffmpeg_dir / 'ffprobe',
+                    Path(ffmpeg_path.replace('ffmpeg.exe', 'ffprobe.exe')),
+                    Path(ffmpeg_path.replace('ffmpeg', 'ffprobe'))
+                ])
+            
+            # 添加系统PATH中的ffprobe
+            ffprobe_candidates.extend(['ffprobe.exe', 'ffprobe'])
+            
+            # 尝试每个ffprobe候选
+            for ffprobe_path in ffprobe_candidates:
+                try:
+                    cmd = [
+                        str(ffprobe_path),
+                        '-v', 'quiet',
+                        '-show_entries', 'format=duration',
+                        '-of', 'csv=p=0',
+                        str(video_path)
+                    ]
+                    
+                    result = subprocess.run(
+                        cmd,
+                        capture_output=True,
+                        text=True,
+                        encoding='utf-8',
+                        errors='ignore',
+                        timeout=15
+                    )
+                    
+                    if result.returncode == 0 and result.stdout.strip():
+                        duration = float(result.stdout.strip())
+                        if duration > 0:
+                            self.logger.debug(f"通过ffprobe获取时长: {duration}秒")
+                            return duration
+                            
+                except (subprocess.TimeoutExpired, FileNotFoundError, ValueError, OSError):
+                    continue
+            
+            # 方法2: 使用ffmpeg获取时长（从stderr解析）
+            cmd_fallback = [
+                ffmpeg_path,
+                '-i', str(video_path),
+                '-f', 'null', '-',
+                '-t', '0.1'  # 只处理很短时间，快速获取信息
+            ]
+            
+            result = subprocess.run(
+                cmd_fallback,
+                capture_output=True,
+                text=True,
+                encoding='utf-8',
+                errors='ignore',
+                timeout=15
+            )
+            
+            # 从stderr解析Duration信息
+            if result.stderr:
+                for line in result.stderr.split('\n'):
+                    if 'Duration:' in line:
+                        try:
+                            # 查找Duration: HH:MM:SS.ss格式
+                            duration_part = line.split('Duration: ')[1].split(',')[0].strip()
+                            time_parts = duration_part.split(':')
+                            if len(time_parts) == 3:
+                                hours = float(time_parts[0])
+                                minutes = float(time_parts[1])
+                                seconds = float(time_parts[2])
+                                duration = hours * 3600 + minutes * 60 + seconds
+                                if duration > 0:
+                                    self.logger.debug(f"通过ffmpeg获取时长: {duration}秒")
+                                    return duration
+                        except (ValueError, IndexError):
+                            continue
+                
+        except Exception as e:
+            self.logger.warning(f"获取视频时长失败 {video_path.name}: {e}")
+            
+        self.logger.debug(f"无法获取视频时长: {video_path.name}")
+        return None
+    
     def generate_audio_filename(self, 
                               video_path: Path, 
                               output_dir: Optional[str] = None,
@@ -411,7 +563,8 @@ class VideoAudioConverter:
                           input_path: Path, 
                           output_path: Path,
                           audio_format: str = 'mp3', 
-                          bitrate: str = '192k') -> bool:
+                          bitrate: str = '192k',
+                          progress_callback=None) -> bool:
         """
         转换单个视频文件为音频
         
@@ -420,6 +573,7 @@ class VideoAudioConverter:
             output_path: 输出音频文件路径
             audio_format: 音频格式
             bitrate: 音频比特率
+            progress_callback: 进度回调函数，接收 (current_time, total_time, percentage) 参数
             
         Returns:
             转换是否成功
@@ -451,16 +605,96 @@ class VideoAudioConverter:
                 str(output_path)        # 输出文件
             ]
             
-            # 执行转换
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                encoding='utf-8',
-                errors='ignore',  # 忽略编码错误
-                timeout=300,  # 5分钟超时
-                check=True
-            )
+            # 如果有进度回调，使用实时输出模式
+            if progress_callback:
+                # 获取视频总时长
+                total_duration = self._get_video_duration(input_path)
+                self.logger.debug(f"视频时长: {total_duration}秒")
+                
+                # 使用stderr输出监控进度（更可靠的方法）
+                process = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    encoding='utf-8',
+                    errors='ignore'
+                )
+                
+                import time
+                progress_start_time = time.time()
+                last_reported_time = 0
+                
+                # 实时读取stderr输出
+                while True:
+                    output = process.stderr.readline()
+                    if output == '' and process.poll() is not None:
+                        break
+                    
+                    if output:
+                        # 查找时间信息 (格式: time=00:01:23.45)
+                        if 'time=' in output:
+                            try:
+                                time_match = output.split('time=')[1].split()[0]
+                                # 解析时间格式 HH:MM:SS.ss
+                                time_parts = time_match.split(':')
+                                if len(time_parts) >= 3:
+                                    hours = float(time_parts[0])
+                                    minutes = float(time_parts[1])
+                                    seconds = float(time_parts[2])
+                                    current_time = hours * 3600 + minutes * 60 + seconds
+                                    
+                                    # 避免重复报告相同的时间
+                                    if current_time > last_reported_time:
+                                        last_reported_time = current_time
+                                        
+                                        if total_duration and total_duration > 0:
+                                            # 有总时长，显示准确进度
+                                            percentage = min((current_time / total_duration) * 100, 100)
+                                            progress_callback(current_time, total_duration, percentage)
+                                        else:
+                                            # 没有总时长，基于处理时间估算
+                                            elapsed_real_time = time.time() - progress_start_time
+                                            # 假设转换速度约为1:1到2:1
+                                            estimated_total = max(current_time * 1.2, elapsed_real_time * 2)
+                                            percentage = min((current_time / estimated_total) * 100, 95)
+                                            progress_callback(current_time, estimated_total, percentage)
+                                            
+                            except (ValueError, IndexError) as e:
+                                self.logger.debug(f"解析时间失败: {e}")
+                                pass
+                        
+                        # 检查是否有错误信息
+                        if 'error' in output.lower() or 'failed' in output.lower():
+                            self.logger.warning(f"FFmpeg警告: {output.strip()}")
+                
+                # 等待进程完成
+                return_code = process.wait()
+                
+                if return_code != 0:
+                    # 读取剩余的stderr输出
+                    remaining_stderr = process.stderr.read()
+                    self.logger.error(f"✗ FFmpeg转换失败 {input_path.name}: {remaining_stderr}")
+                    return False
+                else:
+                    # 确保进度显示100%
+                    if progress_callback:
+                        if total_duration and total_duration > 0:
+                            progress_callback(total_duration, total_duration, 100.0)
+                        else:
+                            progress_callback(last_reported_time, last_reported_time, 100.0)
+                    
+            else:
+                # 原有的非进度模式
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    encoding='utf-8',
+                    errors='ignore',  # 忽略编码错误
+                    timeout=300,  # 5分钟超时
+                    check=True
+                )
             
             # 验证输出文件是否创建成功
             if output_path.exists() and output_path.stat().st_size > 0:
@@ -481,10 +715,15 @@ class VideoAudioConverter:
             return False
             
     def _convert_single_task(self, video_file: Path, output_directory: Optional[str], 
-                           audio_format: str, bitrate: str) -> Tuple[bool, Path, Path]:
+                           audio_format: str, bitrate: str, progress_callback=None, 
+                           file_progress_callback=None) -> Tuple[bool, Path, Path]:
         """
         单个文件转换任务（用于多线程）
         
+        Args:
+            progress_callback: 进度回调函数（用于单文件转换）
+            file_progress_callback: 文件级进度回调函数，接收 (filename, current_time, total_time, percentage) 参数
+            
         Returns:
             (是否成功, 输入文件路径, 输出文件路径)
         """
@@ -499,8 +738,15 @@ class VideoAudioConverter:
                 with self._lock:
                     self.logger.info(f"🔧 文件名已清理: {video_file.name} -> {audio_file.name}")
             
+            # 创建文件级进度回调包装器
+            def wrapped_progress_callback(current_time, total_time, percentage):
+                if progress_callback:
+                    progress_callback(current_time, total_time, percentage)
+                if file_progress_callback:
+                    file_progress_callback(video_file.name, current_time, total_time, percentage)
+            
             # 转换文件
-            success = self.convert_single_file(video_file, audio_file, audio_format, bitrate)
+            success = self.convert_single_file(video_file, audio_file, audio_format, bitrate, wrapped_progress_callback)
             return success, video_file, audio_file
             
         except Exception as e:
@@ -509,22 +755,24 @@ class VideoAudioConverter:
             return False, video_file, Path("")
 
     def batch_convert(self, 
-                     input_directory: str, 
+                     input_path: str, 
                      output_directory: Optional[str] = None,
                      audio_format: str = 'mp3',
                      bitrate: str = '192k',
                      recursive: bool = True,
-                     max_workers: Optional[int] = None) -> Tuple[int, int, int]:
+                     max_workers: Optional[int] = None,
+                     file_progress_callback=None) -> Tuple[int, int, int]:
         """
-        批量转换视频文件
+        批量转换视频文件或单个视频文件
         
         Args:
-            input_directory: 输入目录
+            input_path: 输入目录或单个视频文件路径
             output_directory: 输出目录
             audio_format: 音频格式
             bitrate: 音频比特率
-            recursive: 是否递归扫描
+            recursive: 是否递归扫描（仅对目录有效）
             max_workers: 最大线程数，None表示使用配置文件中的设置
+            file_progress_callback: 文件级进度回调函数，接收 (filename, current_time, total_time, percentage) 参数
             
         Returns:
             (成功数量, 总数量, 重复数量)
@@ -536,7 +784,7 @@ class VideoAudioConverter:
             return 0, 0, 0
         
         # 扫描视频文件（包括重复文件检测）
-        video_files = self.scan_video_files(input_directory, recursive)
+        video_files = self.scan_video_files(input_path, recursive)
         duplicate_count = len(self.duplicate_files)
         
         if not video_files:
@@ -571,7 +819,8 @@ class VideoAudioConverter:
                     pbar.set_description(f"📹 {video_file.name[:30]}...")
                     
                     success, _, audio_file = self._convert_single_task(
-                        video_file, output_directory, audio_format, bitrate
+                        video_file, output_directory, audio_format, bitrate, 
+                        file_progress_callback=file_progress_callback
                     )
                     
                     if success:
@@ -589,7 +838,8 @@ class VideoAudioConverter:
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 # 提交所有任务
                 future_to_file = {
-                    executor.submit(self._convert_single_task, video_file, output_directory, audio_format, bitrate): video_file
+                    executor.submit(self._convert_single_task, video_file, output_directory, audio_format, bitrate, 
+                                  file_progress_callback=file_progress_callback): video_file
                     for video_file in video_files
                 }
                 
@@ -675,7 +925,7 @@ def main():
     parser.add_argument(
         'input_dir', 
         nargs='?',  # 使参数可选
-        help='输入视频文件目录路径 (可在配置文件中设置默认值)'
+        help='输入视频文件目录路径或单个视频文件路径 (可在配置文件中设置默认值)'
     )
     parser.add_argument(
         '-o', '--output-dir', 
@@ -726,14 +976,14 @@ def main():
         # 创建转换器实例
         converter = VideoAudioConverter(args.config)
         
-        # 处理输入目录
+        # 处理输入路径（目录或文件）
         if args.input_dir:
-            input_directory = args.input_dir
+            input_path = args.input_dir
         else:
             # 使用配置文件中的默认输入目录
-            input_directory = converter.config.get('DEFAULT', 'default_input_directory', fallback='')
-            if not input_directory:
-                print("❌ 错误: 未指定输入目录，请在命令行中指定或在配置文件中设置 default_input_directory")
+            input_path = converter.config.get('DEFAULT', 'default_input_directory', fallback='')
+            if not input_path:
+                print("❌ 错误: 未指定输入路径，请在命令行中指定或在配置文件中设置 default_input_directory")
                 sys.exit(1)
         
         # 处理输出目录
@@ -750,7 +1000,12 @@ def main():
             converter.config.set('DEFAULT', 'overwrite_existing', 'true')
         
         # 显示操作信息
-        print(f"📂 输入目录: {input_directory}")
+        input_path_obj = Path(input_path)
+        if input_path_obj.is_file():
+            print(f"� 输出入文件: {input_path}")
+        else:
+            print(f"� 输入目录: {原input_path}")
+            
         if output_directory:
             print(f"📁 输出目录: {output_directory}")
         else:
@@ -769,7 +1024,7 @@ def main():
         start_time = time.time()
         
         success, total, duplicates = converter.batch_convert(
-            input_directory,
+            input_path,
             output_directory,
             args.format,
             args.quality,

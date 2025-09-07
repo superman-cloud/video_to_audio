@@ -1,0 +1,97 @@
+# created by virtualenv automatically
+
+# Log files
+*.log
+logs/
+*.idea
+# PyCharm / IntelliJ IDEA (完整忽略)
+.idea/
+
+# 如果需要共享某些 IDEA 配置，可以使用以下更精确的规则：
+# .idea/workspace.xml
+# .idea/tasks.xml
+# .idea/usage.statistics.xml
+# .idea/dictionaries/
+# .idea/shelf/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environment
+.venv/
+venv/
+ENV/
+env/
+.env
+
+# 注意：上面已经包含了 .idea/ 的完整忽略
+
+# VS Code
+.vscode/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# pyenv
+.python-version
+
+# pipenv
+Pipfile.lock
+
+# pytest
+.pytest_cache/
+.coverage
+htmlcov/
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Windows
+desktop.ini
+
+# Temporary files
+*.tmp
+*.temp
+*~
+
+# FFmpeg temporary files
+*.ffmpeg_*
+
+# Audio/Video files (如果不想提交转换后的文件)
+# *.mp3
+# *.wav
+# *.aac
+# *.m4a
+# *.ogg
+# *.flac

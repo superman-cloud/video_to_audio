@@ -5,6 +5,9 @@
 # Progress bar library
 tqdm>=4.64.0
 
+# GUI dependencies (tkinter is built-in with Python)
+# tkinter - GUI framework (built-in)
+
 # FFmpeg Python binding (optional if ffmpeg is already installed on system)
 # ffmpeg-python>=0.2.0
 
